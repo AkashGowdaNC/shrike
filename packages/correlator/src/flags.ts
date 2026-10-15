@@ -34,7 +34,7 @@ export function normalizeSql(sql: string): string {
 const ANALYTICS_HOSTS = ["google-analytics.com", "googletagmanager.com", "segment.com", "segment.io"];
 
 function isAnalyticsHost(host: string): boolean {
-  return ANALYTICS_HOSTS.some((h) => host.endsWith(h));
+  return ANALYTICS_HOSTS.some((h) => host === h || host.endsWith("." + h));
 }
 
 function blockedRequest(view: View): Flag | undefined {
@@ -44,7 +44,9 @@ function blockedRequest(view: View): Flag | undefined {
     const e = n.event;
     if (e.kind !== "http_request" || e.origin !== "browser" || e.status !== "error") return;
     const h = e.http;
-    if (!h || h.status !== undefined) return; // a status means the browser got an answer; not blocked
+    if (!h) return;
+    // Only inspect requests that got no answer, or got a 401 (a cookie may have dropped).
+    if (h.status !== undefined && h.status !== 401) return;
     try {
       const u = new URL(h.url, "https://shrike.local");
       if (isAnalyticsHost(u.hostname)) return;
@@ -57,10 +59,33 @@ function blockedRequest(view: View): Flag | undefined {
 
   const h = found.http!;
   const isAbsolute = /^https?:\/\//.test(h.url);
-  const isHttp = h.url.startsWith("http://");
+  
+  let host = h.url;
+  if (isAbsolute) {
+    try {
+      host = new URL(h.url).host;
+    } catch {
+      // keep the raw url
+    }
+  }
 
-  // Mixed content: an https page calling an http URL.
-  if (isHttp) {
+    // SameSite: cross-origin + credentials + 401. Say "may": it's a guess.
+  const hasCredentials = Boolean(h.reqHeaders?.["cookie"] || h.reqHeaders?.["authorization"]);
+  if (isAbsolute && hasCredentials && h.status === 401) {
+    return {
+      kind: "blocked_request",
+      eventId: found.id,
+      message: `The browser may have dropped your login cookie on this cross-site request (SameSite).`,
+      source: found.source,
+    };
+  }
+
+  // Everything below is the "no status" case.
+  if (h.status !== undefined) return undefined;
+
+  // Mixed content: only when we know the page is https (a live-recorded page).
+  // A page served from http calling an http URL is not mixed content.
+  if (found.live && h.url.startsWith("http://")) {
     return {
       kind: "blocked_request",
       eventId: found.id,
@@ -70,17 +95,12 @@ function blockedRequest(view: View): Flag | undefined {
   }
 
   // CORS: an absolute (cross-origin) URL that never got a status.
+    // Cross-origin with no status. CORS is likely, but the server could also be down.
   if (isAbsolute) {
-    let host = h.url;
-    try {
-      host = new URL(h.url).host;
-    } catch {
-      // keep the raw url
-    }
     return {
       kind: "blocked_request",
       eventId: found.id,
-      message: `The browser blocked this request (CORS). ${host} didn't allow requests from the page's origin.`,
+      message: `The browser blocked this request, or ${host} didn't answer. If the server is up, it's CORS: it doesn't allow requests from this page.`,
       source: found.source,
     };
   }

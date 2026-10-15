@@ -92,6 +92,7 @@ export function mixedContent() {
     startMs: 1,
     durationMs: 2,
     status: "error",
+    live: true,
     source: { file: "src/api.ts", line: 30, precision: "exact" },
     http: { method: "GET", url: "http://insecure.example.com/img.png" },
   });
@@ -111,6 +112,22 @@ export function sameOriginDown() {
     status: "error",
     source: { file: "src/api.ts", line: 5, precision: "exact" },
     http: { method: "GET", url: "/api/data" },
+  });
+  return { root, events: [fetch, root], ids: { fetch } };
+}
+// SameSite: a cross-origin request with credentials that came back 401.
+export function sameSiteBlocked() {
+  const root = ev({ kind: "user_action", origin: "browser", name: 'Clicked "Refresh"', trigger: "click", startMs: 0, durationMs: 3 });
+  const fetch = ev({
+    kind: "http_request",
+    origin: "browser",
+    parentId: root.id,
+    name: "GET https://api.example.com/me",
+    startMs: 1,
+    durationMs: 2,
+    status: "error",
+    source: { file: "src/api.ts", line: 20, precision: "exact" },
+    http: { method: "GET", url: "https://api.example.com/me", status: 401, reqHeaders: { cookie: "session=abc" } },
   });
   return { root, events: [fetch, root], ids: { fetch } };
 }
