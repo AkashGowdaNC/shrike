@@ -45,6 +45,8 @@ export interface DebugEvent {
     status?: number;
     reqHeaders?: Record<string, string>;
     resHeaders?: Record<string, string>;
+    serverTiming?: { name: string; durMs?: number; desc?: string }[]; // #59: parsed Server-Timing, ≤ 20 entries
+    serverTraceId?: string; // #59: trace ID from the traceresponse header, the one the server used (not Shrike's traceId)
     reqBody?: string; // ≤ 64KB, truncated with "…[truncated]"
     resBody?: string;
     fromCache?: true; // #55: the browser's cache or the site's service worker answered, not the network
@@ -57,7 +59,7 @@ export interface DebugEvent {
   stack?: string; // raw JS stack captured at call time (browser http_request, or a React 19 user_action's JSX); main resolves it into source
   target?: { x: number; y: number; width: number; height: number; viewportWidth: number; viewportHeight: number }; // user_action click target rect (CSS px)
   place?: Place; // where this event ran; set by agents or main (services, datastores, outside hosts, callers)
-  cache?: { op: string; key?: string; hit?: boolean }; // cache_op: op "get" | "set" | "del" | "incr" | ...; hit for reads
+  cache?: { op: string; key?: string; path?: string; hit?: boolean }; // cache_op: op "get" | "set" | "del" | "incr" | ...; hit for reads
   caller?: { kind: "browser" | "curl" | "postman" | "explorer" | "agent" | "cron" | "test" | "service" | "other"; label: string; command?: string }; // user_action roots that didn't start in a browser
   change?: DataChange; // I3: db_query writes, captured by node-agent around the statement
   resendOf?: string; // AP: user_action roots, the trip this request edited and resent
@@ -153,6 +155,14 @@ export interface ProjectInfo {
   liveUrl?: string; // .shrike/config.json "liveUrl": the deployed site (#54); with no dev command, Run opens it instead of starting anything
   origins?: string[]; // .shrike/config.json "origins": extra API hosts the user lists for the live site
   livePartition?: string; // set by main with liveUrl: the live site's own session (#55), so its logins survive restarts and never mix with the local pane's
+  redact?: RedactRules; // .shrike/config.json "redact" (#52), validated by main; a broken block is dropped with a note
+}
+
+// #52 (docs/07 rule 6): keys and headers are redacted at the store in every mode; keep only spares values from masking
+export interface RedactRules {
+  keys?: string[];
+  headers?: string[];
+  keep?: string[];
 }
 
 export interface RunStatus {
@@ -1701,6 +1711,7 @@ export interface ShrikeHost {
   remember(note: { text: string; file?: string; line?: number }): Promise<MemoryNote>; // A5, MCP tool "remember"
   noteWatch(client: string, actionIds: string[]): void; // A11, called when an MCP client reads trips
   liveOrigins?(): string[]; // #53: set by main; the live project's origins (liveUrl's first). Empty or missing: a local project
+  redactKeep?(): string[] | undefined; // #52: set by main; .shrike/config.json redact.keep, names whose values live tool output doesn't mask
   drive?: ShrikeDriver; // B5: set by main; its tools are offered to outside MCP clients only (flows engineer)
   askOptions?(req: OptionsAsk): Promise<OptionsReply>; // M1: set by main; waits for the user's cards, or times out with action "waiting"
   preflight?(): Promise<string>; // CI3: set by main; runs only legs from the CI config or the lessons skill, through the guarded shell

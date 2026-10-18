@@ -3,14 +3,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ElectronApplication, Page } from "playwright";
 import type { ActionView } from "@shrike/schema";
-import { actions, flatten, freePort, launch, mcpClient, shot, waitFor } from "./helpers.ts";
+import { actions, flatten, freePort, launch, mcpClient, shot, SHOTS, waitFor } from "./helpers.ts";
+import { stub } from "../../../fixtures/live-supabase/stub.ts";
+
+// #64: press Save card in the open REC menu, wait for the PNG (SHRIKE_SAVE_DIR skips the dialog), keep a copy with the shots.
+async function saveCard(win: Page, dir: string, size: string, name: string): Promise<{ w: number; h: number; ms: number }> {
+  const t0 = Date.now();
+  await win.getByRole("dialog", { name: "Record a clip" }).getByRole("button", { name: "Save card" }).click();
+  const file = await waitFor(`the ${size} card`, () => readdirSync(dir).find((f) => f.endsWith(`-${size}.png`)), 15_000);
+  const ms = Date.now() - t0;
+  const png = readFileSync(join(dir, file));
+  copyFileSync(join(dir, file), join(SHOTS, `v5-e2e-${name}.png`));
+  return { w: png.readUInt32BE(16), h: png.readUInt32BE(20), ms };
+}
 
 const SUPA = "abcdefghijklmnopqrst.supabase.co";
 const PAGE = `<!doctype html><title>Live</title><button id="go">Load orders</button><script src="/app.js"></script>`;
@@ -93,6 +105,21 @@ test("live site: consent once, a click records fetch, XHR, console and Supabase,
     await mcp.close();
     await shot(app, "live-site-01-recorded");
 
+    // #52: REC on a live trip previews the exact frame, without the page until Show the page is ticked.
+    const rec = win.getByRole("button", { name: "Rec", exact: true });
+    await rec.click();
+    const menu = win.getByRole("dialog", { name: "Record a clip" });
+    const page = menu.getByRole("checkbox", { name: "Show the page" });
+    assert.equal(await page.isChecked(), false);
+    await menu.getByText("Live values are hidden, and so is your live page.", { exact: false }).waitFor();
+    await waitFor("the preview frame", async () => (await menu.getByLabel("Preview of the clip").evaluate((c) => (c as HTMLCanvasElement).width)) > 300);
+    await shot(app, "live-site-03-rec-preview");
+    await page.check();
+    await menu.getByText("Live values are hidden. Then asks where to save.", { exact: false }).waitFor();
+    await win.waitForTimeout(500);
+    await shot(app, "live-site-04-rec-show-page");
+    await rec.click();
+
     // The same host never asks again.
     await win.evaluate(() => window.shrike.stop());
     assert.equal((await win.evaluate(() => window.shrike.run())).state, "running");
@@ -138,7 +165,8 @@ createServer((req, res) => {
   const appUrl = `http://localhost:${localPort}`;
   writeFileSync(join(root, ".shrike", "config.json"), JSON.stringify({ appUrl, processes: [{ name: "web", command: "node server.mjs", url: appUrl }], liveUrl }));
 
-  const { app, win, cleanup } = await launch({ SHRIKE_OPEN_FOLDER: root }, undefined, [`--host-resolver-rules=MAP live.test 127.0.0.1, MAP ${SUPA} 127.0.0.1`]);
+  const saved = mkdtempSync(join(tmpdir(), "shrike-e2e-cards-"));
+  const { app, win, cleanup } = await launch({ SHRIKE_OPEN_FOLDER: root, SHRIKE_SAVE_DIR: saved }, undefined, [`--host-resolver-rules=MAP live.test 127.0.0.1, MAP ${SUPA} 127.0.0.1`]);
   try {
     await app.evaluate(({ dialog }) => {
       const g = globalThis as { asked?: string[] };
@@ -176,6 +204,9 @@ createServer((req, res) => {
     assert.match(await split.locator(".th-split-cap").innerText(), /^Supabase answered with 0 rows from orders\./);
     assert.equal(await split.locator(".th-first").count(), 2, "the first difference is bracketed on both sides");
     await shot(app, "live-site-02-local-vs-live");
+    await win.getByRole("button", { name: "Rec", exact: true }).click(); // #64: the split as one local vs live card
+    const card = await saveCard(win, saved, "1200x630", "live-site-07-card-local-vs-live");
+    assert.deepEqual([card.w, card.h], [1200, 630]);
 
     // Same shape on both sides (rows on live too): no difference, only the time.
     await split.getByRole("button", { name: "Close" }).click();
@@ -207,6 +238,7 @@ createServer((req, res) => {
     await cleanup();
     live.close();
     rmSync(root, { recursive: true, force: true });
+    rmSync(saved, { recursive: true, force: true });
   }
 });
 
@@ -376,5 +408,70 @@ test("live sign-in: own session that survives a restart, plain user agent, recor
     }
   } finally {
     await cleanup();
+  }
+});
+
+// #61: the fixtures/live-supabase build against its stub, opened as a live site (its strict CSP and service worker included).
+test("live-supabase fixture: Save works with no 403, the list reads 0 rows with the caption, the fixed policy reads rows", { timeout: 240_000 }, async () => {
+  const fixture = join(import.meta.dirname, "../../../fixtures/live-supabase");
+  const port = await freePort();
+  const dist = mkdtempSync(join(tmpdir(), "shrike-e2e-live-supabase-"));
+  const url = `http://live.test:${port}/`;
+  execFileSync(join(fixture, "node_modules/.bin/vite"), ["build", "--outDir", dist, "--emptyOutDir"], { cwd: fixture, stdio: "ignore", env: { ...process.env, VITE_SUPABASE_URL: `http://live.test:${port}`, VITE_SUPABASE_ANON_KEY: "stub-anon-key" } });
+  const supa = stub({ empty: true, dist });
+  await new Promise<void>((ok) => supa.server.listen(port, "127.0.0.1", ok));
+  const saved = mkdtempSync(join(tmpdir(), "shrike-e2e-cards-"));
+  const { app, win, cleanup } = await launch({ SHRIKE_SAVE_DIR: saved }, undefined, ["--host-resolver-rules=MAP live.test 127.0.0.1"]);
+  try {
+    await app.evaluate(({ dialog }) => void (dialog.showMessageBox = (async () => ({ response: 0, checkboxChecked: false })) as typeof dialog.showMessageBox));
+    await win.getByRole("textbox", { name: "Open a live site" }).fill(url);
+    await win.getByRole("button", { name: "Open a live site" }).click();
+    const guest = await waitFor("the live page", () => app.windows().find((p) => p.url().startsWith(url)), 30_000);
+    await guest.getByText("No orders yet.").waitFor();
+
+    const save = async (after: number) => {
+      await guest.getByRole("button", { name: "Save" }).click();
+      return waitFor("the Save trip", async () => (await actions(win)).find((a) => a.label === 'Clicked "Save"' && a.complete && a.startMs > after && flatten(a.tree).some((e) => e.db?.statement.startsWith("SELECT"))), 20_000);
+    };
+    const read = (a: ActionView) => flatten(a.tree).find((e) => e.db?.statement === "SELECT id,item,qty,customer FROM orders");
+
+    const planted = await save(0);
+    const evs = flatten(planted.tree);
+    assert.equal(evs.find((e) => e.db?.statement === "INSERT INTO orders")?.http?.status, 201, "Save succeeds");
+    assert.ok(!evs.some((e) => e.status === "error" || (e.http?.status ?? 0) >= 400), "no 403 in the planted version");
+    assert.equal(read(planted)?.returned, "0 rows");
+    assert.ok(planted.flags.some((f) => f.kind === "empty_result" && f.message.startsWith("Supabase answered with 0 rows from orders.")), JSON.stringify(planted.flags));
+    await guest.getByText("Saved.").waitFor();
+    await guest.getByText("No orders yet.").waitFor();
+
+    // #64: the planted trip as a card at both sizes; Show values previews the card first.
+    await win.locator(`nav[aria-label="Trips"] button[data-trip="${planted.id}"]`).click();
+    const rec = win.getByRole("button", { name: "Rec", exact: true });
+    const menu = win.getByRole("dialog", { name: "Record a clip" });
+    await rec.click();
+    const values = menu.getByRole("checkbox", { name: "Show values on the card" });
+    assert.equal(await values.isChecked(), false);
+    await values.check();
+    await waitFor("the card preview", async () => (await menu.getByLabel("Preview of the card").evaluate((c) => (c as HTMLCanvasElement).width)) === 1080);
+    await values.uncheck();
+    await menu.getByRole("button", { name: "16:9" }).click();
+    const wide = await saveCard(win, saved, "1200x630", "live-site-05-card");
+    await rec.click();
+    await menu.getByRole("button", { name: "9:16" }).click();
+    const tall = await saveCard(win, saved, "1080x1350", "live-site-06-card-portrait");
+    assert.deepEqual([wide.w, wide.h, tall.w, tall.h], [1200, 630, 1080, 1350]);
+    console.log(`# card saved in ${wide.ms} ms (1200x630) and ${tall.ms} ms (1080x1350), including the 200 ms file poll`);
+
+    supa.state.empty = false; // fix.sql applied
+    const fixed = await save(planted.startMs);
+    assert.match(read(fixed)?.returned ?? "", /^[1-9]\d* rows?$/);
+    assert.ok(!fixed.flags.some((f) => f.kind === "empty_result"));
+    await guest.getByText("Blue mug x1, You").first().waitFor();
+    await shot(app, "live-site-03-live-supabase");
+  } finally {
+    await cleanup();
+    supa.server.close();
+    rmSync(dist, { recursive: true, force: true });
+    rmSync(saved, { recursive: true, force: true });
   }
 });

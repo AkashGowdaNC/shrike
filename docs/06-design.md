@@ -94,11 +94,11 @@ Long trips stay readable: plumbing (framework code, repeated helpers) collapses 
 - Conversation (Q2, the speech-bubble button on the composer): this worktree's asks and the agent's answers, oldest first, steps folded, branches marked with their colour and a Show button.
 - Appearance (Z7, palette button in the top bar and on the welcome screen, Z8): six themes (Abyss, Void, Tokyo, Mocha, Daylight, High contrast) and Match system. A theme swaps the design tokens at the root, so everything follows, including code colours and the macOS window chrome. The user's app and mockups keep their own look.
 - E opens the focused station's file:line in the user's own editor.
-- REC exports the trip as a 9:16 or 16:9 clip: M1 → M2 → M3 → M4 with captions (and M8 if a fix follows). Four lanes in a portrait frame fit naturally.
+- REC exports the trip as a 9:16 or 16:9 clip: M1 → M2 → M3 → M4 with captions (and M8 if a fix follows). Four lanes in a portrait frame fit naturally. A live trip's clip masks its values and leaves out the page screenshot; the menu shows a preview frame and a Show the page box (LV3, #52). Save card in the same menu makes the still image people post: the trip verdict big, the trip drawn small, time, steps and rows, and a github.com/SumantxD/shrike footer, at 1200x630 or 1080x1350, copied and saved as a PNG; local vs live gets both trips with both numbers. Cards are shapes only (no values or query strings) unless Show values on the card is ticked, and a live trip stays masked either way (LV4, #64).
 
 ## Keyboard
 
-Scroll/↑/↓ step · PgUp/PgDn trip · Enter dive · Esc surface · Space replay the trip (M1) · T time view · ! next failure · F trips · P app dock · O app in its own window (O again docks it back) · G N A \` D sheets · E editor · R record · V Thread or Files view · ⌘K focus the composer. Never fire while typing. In the Files view ← → also step, Home and End jump to the first and last step, Space plays the steps and pauses, and Esc steps out from the file cards to the tree, then the whole route.
+Scroll/↑/↓ step · PgUp/PgDn trip · Enter dive · Esc surface · Space replay the trip (M1) · T time view · ! next failure · F trips (↑ ↓ move between them, Esc goes back to the Thread) · P app dock · O app in its own window (O again docks it back) · G N A \` D sheets · E editor · R record · V Thread or Files view · ⌘K focus the composer. Never fire while typing. In the Files view ← → also step, Home and End jump to the first and last step, Space plays the steps and pauses, and Esc steps out from the file cards to the tree, then the whole route.
 
 ## Files view (FV)
 

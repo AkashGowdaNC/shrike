@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { DebugEvent } from "@shrike/schema";
-import { entropy, redactCell, redactEvent, redactText } from "../src/index.ts";
+import { entropy, maskText, maskValues, type PiiSeen, redactCell, redactEvent, redactPii, redactText } from "../src/index.ts";
 
 test("keys inside JSON keep the key and stay valid JSON", () => {
   const out = redactText('{"email":"a@b.co","password":"hunter2","nested":{"apiKey":"abc123","card":4242424242424242,"author":"Ann"},"maxTokens":100}');
@@ -174,4 +174,159 @@ test("a URL's port and path are not a secret (Firestore emulator channel)", () =
 test("nextjs-supabase: a React className is not a social security number", () => {
   assert.equal(redactText("{ className: 'inline-flex items-center', variant: undefined }"), "{ className: 'inline-flex items-center', variant: undefined }");
   assert.equal(redactText("{ userSsn: '123-45-6789' }"), "{ userSsn: '[redacted:userSsn]' }");
+});
+
+// #52: a Supabase `orders` answer with 5 rows of realistic personal data
+const ORDERS = JSON.stringify([
+  { id: 101, user_id: "550e8400-e29b-41d4-a716-446655440000", name: "Ada Lovelace", street: "12 Crescent Road", note: "Leave it by the blue door", status: "pending", total: 42.5, items: 3, paid: false, coupon: null },
+  { id: 102, user_id: "6f1c2b9a-3d4e-4f5a-8b6c-7d8e9f0a1b2c", name: "Grace Hopper", street: "4 Harbour Lane", note: "Call when outside", status: "paid", total: 19, items: 1, paid: true, coupon: "SPRING" },
+  { id: 103, user_id: "7a2d3c0b-4e5f-4a6b-9c7d-8e9f0a1b2c3d", name: "Alan Turing", street: "221 Wilmslow Road", note: "Gift wrap please", status: "pending", total: 7.25, items: 2, paid: false, coupon: null },
+  { id: 104, user_id: "8b3e4d1c-5f6a-4b7c-ad8e-9f0a1b2c3d4e", name: "Katherine Johnson", street: "9 Mercury Avenue, Apt 3", note: "", status: "shipped", total: 120, items: 5, paid: true, coupon: null },
+  { id: 105, user_id: "9c4f5e2d-6a7b-4c8d-be9f-0a1b2c3d4e5f", name: "Edsger Dijkstra", street: "1 Shortest Path", note: "No rush", status: "pending", total: 3, items: 1, paid: false, coupon: null },
+]);
+
+test("#52 maskValues: 5 rows of personal data lose names, streets and free text; ids, numbers, keys and enum words stay", () => {
+  const e: DebugEvent = {
+    id: "0000000000000003", traceId: "0af7651916cd43dd8448eb211c80319c", origin: "browser", kind: "db_query", name: "SELECT orders", startMs: 1, status: "ok", live: true,
+    http: { method: "GET", url: "/rest/v1/orders?select=*&status=eq.pending&email=eq.ada%40example.com", resBody: ORDERS },
+    db: { system: "postgres", statement: "SELECT orders", params: '["pending","eq.ada@example.com"]' },
+    change: { table: "orders", op: "update", count: 1, rows: [{ pk: "101", after: { id: 101, street: "12 Crescent Road", status: "paid" } }] },
+  };
+  const before = JSON.stringify(e);
+  const r = maskValues(e);
+  assert.equal(JSON.stringify(e), before, "never mutates");
+  const out = r.http!.resBody!;
+  for (const word of ["Ada", "Lovelace", "Grace", "Crescent", "Harbour", "Wilmslow", "Mercury", "blue door", "Gift wrap", "No rush", "Call when"]) assert.ok(!out.includes(word), word);
+  const rows = JSON.parse(out) as Record<string, unknown>[];
+  assert.deepEqual(rows.map((x) => x.id), [101, 102, 103, 104, 105]);
+  assert.deepEqual(rows.map((x) => x.status), ["pending", "paid", "pending", "shipped", "pending"]);
+  assert.equal(rows[0]!.user_id, "550e8400-e29b-41d4-a716-446655440000");
+  assert.deepEqual([rows[0]!.total, rows[0]!.items, rows[0]!.paid, rows[0]!.coupon, rows[1]!.coupon, rows[3]!.note], [42.5, 3, false, null, "SPRING", ""]);
+  assert.deepEqual(Object.keys(rows[0]!), Object.keys((JSON.parse(ORDERS) as Record<string, unknown>[])[0]!));
+  assert.match(String(rows[0]!.name), /^\[text#\d+\]$/);
+  const n = /email=(\[text#\d+\])$/.exec(r.http!.url)?.[1];
+  assert.ok(n && r.http!.url.startsWith("/rest/v1/orders?select=*&status=eq.pending&email="));
+  assert.equal(r.db!.params, `["pending","${n}"]`, "the same value keeps its number within an event");
+  assert.equal(r.change!.rows![0]!.after!.status, "paid");
+  assert.match(String(r.change!.rows![0]!.after!.street), /^\[text#\d+\]$/);
+});
+
+test("#52 maskText: keep list, inspect previews, form data; a 25-character word goes", () => {
+  assert.equal(maskText("{ name: 'Ada Lovelace', plan: 'Team plan', role: 'admin' }", { keep: ["plan"] }), "{ name: '[text#1]', plan: 'Team plan', role: 'admin' }");
+  assert.equal(maskText("name=Ada+Lovelace&page=2"), "name=[text#1]&page=2");
+  assert.equal(maskText('{"code":"ABCDEFGHIJKLMNOPQRSTUVWXY"}'), '{"code":"[text#1]"}');
+  assert.equal(maskText('{"code":"ABCDEFGHIJKLMNOPQRSTUVWX"}'), '{"code":"ABCDEFGHIJKLMNOPQRSTUVWX"}');
+  assert.equal(maskText('{"phone":"555-123-4567","at":"2026-10-15T12:00:00Z"}'), '{"phone":"[text#1]","at":"2026-10-15T12:00:00Z"}');
+  assert.equal(maskText("[redacted:password] and '[text#4]', Bob's 'Ann Lee'"), "[redacted:password] and '[text#4]', Bob's '[text#1]'");
+  const seen = new Map<string, number>();
+  assert.equal(maskText('"Ada Lovelace" "Grace Hopper"', { seen }), '"[text#1]" "[text#2]"');
+  assert.equal(maskText("'Grace Hopper'", { seen }), "'[text#2]'", "a shared map keeps numbers across calls");
+});
+
+test("#52 user rules: redact.keys and redact.headers are redacted at the store like the built-in names", () => {
+  const rules = { keys: ["address"], headers: ["x-tenant"] };
+  assert.equal(redactText('{"address":"12 Crescent Road","city":"Leeds"}', rules), '{"address":"[redacted:address]","city":"Leeds"}');
+  assert.equal(redactText('{"address":"12 Crescent Road"}'), '{"address":"12 Crescent Road"}', "no rules, no change");
+  assert.equal(redactCell("home_address", "x", rules), "[redacted:home_address]");
+  const e: DebugEvent = { id: "0000000000000004", traceId: "0af7651916cd43dd8448eb211c80319c", origin: "browser", kind: "http_request", name: "GET /x", startMs: 1, status: "ok", http: { method: "GET", url: "/x?address=here", reqHeaders: { "X-Tenant": "acme", accept: "*/*" } } };
+  const r = redactEvent(e, rules);
+  assert.deepEqual(r.http!.reqHeaders, { "X-Tenant": "[redacted:x-tenant]", accept: "*/*" });
+  assert.equal(r.http!.url, "/x?address=[redacted:address]");
+});
+
+// ---------------------------------------------------------------- #51: personal data on live trips
+
+const LIVE_ORDERS = JSON.stringify([
+  { id: 101, user_id: "550e8400-e29b-41d4-a716-446655440000", email: "ada@example.com", phone: "+44 20 7946 0958", iban: "GB82 WEST 1234 5698 7654 32", status: "pending", total: 42.5, items: 3, created_at: "2026-10-15T09:30:00Z" },
+  { id: 102, user_id: "6f1c2b9a-3d4e-4f5a-8b6c-7d8e9f0a1b2c", email: "Grace.Hopper+orders@navy.example.org", phone: "(415) 555-0123", iban: null, status: "paid", total: 1234.56, items: 1, created_at: "2026-10-14T18:02:11Z" },
+  { id: 103, user_id: "7a2d3c0b-4e5f-4a6b-9c7d-8e9f0a1b2c3d", email: "ADA@example.com", phone: "415.555.0199", iban: null, status: "pending", total: 7.25, items: 2, created_at: "2026-10-13T07:45:00Z" },
+  { id: 104, user_id: "8b3e4d1c-5f6a-4b7c-ad8e-9f0a1b2c3d4e", email: "katherine@example.co.uk", phone: "+14155550123", iban: "DE89370400440532013000", status: "shipped", total: 120, items: 5, created_at: "2026-10-12T12:00:00Z" },
+  { id: 105, user_id: "9c4f5e2d-6a7b-4c8d-be9f-0a1b2c3d4e5f", email: "edsger@example.nl", phone: "020-555-0147", iban: null, status: "pending", total: 3, items: 1, created_at: "2026-10-11T23:59:59Z" },
+]);
+
+const liveOrders = (p: Partial<DebugEvent> = {}): DebugEvent => ({
+  id: "0000000000000005", traceId: "0af7651916cd43dd8448eb211c80319c", origin: "browser", kind: "db_query", name: "SELECT * FROM orders", startMs: 1, status: "ok", live: true,
+  http: { method: "GET", url: "/rest/v1/orders?select=*&email=eq.ada%40example.com", status: 200, resBody: LIVE_ORDERS },
+  db: { system: "postgres", statement: "SELECT * FROM orders WHERE email = $1", params: '["eq.ada@example.com"]' },
+  change: { table: "orders", op: "update", count: 1, rows: [{ pk: "101", before: { id: 101, email: "ada@example.com", phone: "+44 20 7946 0958" } }] },
+  ...p,
+});
+
+test("#51 pii: a Supabase orders response with 5 rows loses every email, phone and IBAN; ids, counts, numbers, dates and keys stay", () => {
+  const e = liveOrders();
+  const before = JSON.stringify(e);
+  const r = redactEvent(e, undefined, new Map());
+  assert.equal(JSON.stringify(e), before, "never mutates");
+  const out = r.http!.resBody!;
+  for (const pii of ["@", "example", "7946", "555-01", "555.01", "+1415", "GB82", "DE89"]) assert.ok(!out.includes(pii), pii);
+  const rows = JSON.parse(out) as Record<string, unknown>[];
+  const orig = JSON.parse(LIVE_ORDERS) as Record<string, unknown>[];
+  assert.deepEqual(Object.keys(rows[0]!), Object.keys(orig[0]!), "keys stay");
+  for (const k of ["id", "user_id", "status", "total", "items", "created_at"]) assert.deepEqual(rows.map((x) => x[k]), orig.map((x) => x[k]), k);
+  assert.deepEqual(rows.map((x) => x.email), ["[email#1]", "[email#2]", "[email#1]", "[email#3]", "[email#4]"], "ADA@ and ada@ are one user");
+  assert.deepEqual(rows.map((x) => x.phone), ["[phone#1]", "[phone#2]", "[phone#3]", "[phone#4]", "[phone#5]"]);
+  assert.deepEqual(rows.map((x) => x.iban), ["[iban#1]", null, null, "[iban#2]", null]);
+  assert.equal(r.http!.url, "/rest/v1/orders?select=*&email=eq.[email#1]", "the filter's operator stays, the encoded address goes");
+  assert.equal(r.db!.params, '["eq.[email#1]"]');
+  assert.deepEqual(r.change!.rows![0]!.before, { id: 101, email: "[email#1]", phone: "[phone#1]" }, "row cells use the same numbers");
+});
+
+test("#51 pii: without the option, local events keep their emails and phone numbers", () => {
+  const r = redactEvent(liveOrders({ live: undefined }));
+  assert.equal(r.http!.resBody, LIVE_ORDERS);
+  assert.equal(r.http!.url, "/rest/v1/orders?select=*&email=eq.ada%40example.com");
+  assert.equal(redactText("ann@example.com, +1 415 555 0123"), "ann@example.com, +1 415 555 0123");
+});
+
+test("#51 pii: placeholders are stable across one trip's events and start again for the next trip", () => {
+  const trip: PiiSeen = new Map();
+  const a = redactEvent(liveOrders(), undefined, trip);
+  const b = redactEvent(liveOrders({ id: "0000000000000006", http: { method: "POST", url: "/api/notify", reqBody: '{"to":"katherine@example.co.uk","cc":"new@example.com"}' } }), undefined, trip);
+  assert.equal(JSON.parse(a.http!.resBody!)[3].email, "[email#3]");
+  assert.equal(b.http!.reqBody, '{"to":"[email#3]","cc":"[email#5]"}', "the same address reads the same in a later event");
+  assert.equal(redactPii("katherine@example.co.uk", new Map()), "[email#1]", "another trip numbers from 1");
+});
+
+test("#51 pii: ids, dates, times, prices, versions and timestamps that only look like phone numbers stay", () => {
+  const keep = [
+    "order 4155550123", "ORD-415-555-0123", "id 123-456-7890x", "2026-10-15", "15.10.2026", "10:30:00", "$1,234.56", "1,234,567.89", "192.168.1.10", "v1.2.3",
+    "1697371234567", "2026-10-15T10:00:00+05:30", "+0530", "550e8400-e29b-41d4-a716-446655440000", "react@18.3.1", "1e+10", "(123) 45", "page 2 of 3",
+    "DE00370400440532013000", "AB12CDEF34567890XYZ1",
+  ];
+  for (const s of keep) assert.equal(redactPii(s), s, s);
+  assert.equal(redactPii("+1 415 555 0123 4567 8901 234"), "+1 415 555 0123 4567 8901 234", "more than 15 digits is not a phone number");
+});
+
+test("#51 pii: phone shapes, encoded values and IBANs with spaces", () => {
+  assert.equal(redactPii("+1 (415) 555-0123 | 415-555-0123 | 415 555 0123 | (415) 555-0123"), "[phone#1] | [phone#2] | [phone#2] | [phone#2]");
+  assert.equal(redactPii("Call +1 415 555 0123 2 times, or +44 20 7946 0958."), "Call [phone#1] 2 times, or [phone#2].", "a sentence's full stop and a number after it stay");
+  assert.equal(redactPii("415.555.0123.9"), "415.555.0123.9", "a longer dotted number is not a phone");
+  assert.equal(redactPii("phone=%2B14155550123&mail=ann%40shop.com"), "phone=[phone#1]&mail=[email#1]");
+  assert.equal(redactPii("Pay to GB82 WEST 1234 5698 7654 32 or GB82WEST12345698765432."), "Pay to [iban#1] or [iban#1].");
+  assert.equal(redactPii("[redacted:password] [email#2] [text#1]"), "[redacted:password] [email#2] [text#1]", "placeholders survive a second pass");
+});
+
+test("#51 Vercel bypass token is redacted in URLs, names and headers, in every mode", () => {
+  const e: DebugEvent = {
+    id: "0000000000000007", traceId: "0af7651916cd43dd8448eb211c80319c", origin: "browser", kind: "http_request", name: "GET https://app-git-x.vercel.app/?x-vercel-protection-bypass=abc123def456", startMs: 1, status: "ok",
+    http: { method: "GET", url: "https://app-git-x.vercel.app/?x-vercel-protection-bypass=abc123def456&x-vercel-set-bypass-cookie=samesitenone", reqHeaders: { "x-vercel-protection-bypass": "abc123def456", "X-Vercel-Set-Bypass-Cookie": "true" } },
+  };
+  for (const pii of [undefined, new Map()]) {
+    const r = redactEvent(e, undefined, pii);
+    assert.ok(!JSON.stringify(r).includes("abc123def456"), "the token is gone everywhere");
+    assert.equal(r.http!.url, "https://app-git-x.vercel.app/?x-vercel-protection-bypass=[redacted:x-vercel-protection-bypass]&x-vercel-set-bypass-cookie=[redacted:x-vercel-set-bypass-cookie]");
+    assert.equal(r.name, "GET https://app-git-x.vercel.app/?x-vercel-protection-bypass=[redacted:x-vercel-protection-bypass]");
+    assert.deepEqual(r.http!.reqHeaders, { "x-vercel-protection-bypass": "[redacted:x-vercel-protection-bypass]", "X-Vercel-Set-Bypass-Cookie": "[redacted:x-vercel-set-bypass-cookie]" });
+  }
+});
+
+test("#51 Supabase apikey is redacted as a header and a query parameter", () => {
+  const key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiJ9.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE";
+  const e: DebugEvent = {
+    id: "0000000000000008", traceId: "0af7651916cd43dd8448eb211c80319c", origin: "browser", kind: "http_request", name: "GET /rest/v1/orders", startMs: 1, status: "ok",
+    http: { method: "GET", url: `/rest/v1/orders?select=*&apikey=${key}`, reqHeaders: { apikey: key, accept: "application/json" } },
+  };
+  const r = redactEvent(e);
+  assert.deepEqual(r.http!.reqHeaders, { apikey: "[redacted:apikey]", accept: "application/json" });
+  assert.equal(r.http!.url, "/rest/v1/orders?select=*&apikey=[redacted:apikey]");
 });
