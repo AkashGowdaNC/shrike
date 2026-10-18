@@ -45,8 +45,7 @@ function blockedRequest(view: View): Flag | undefined {
     if (e.kind !== "http_request" || e.origin !== "browser" || e.status !== "error") return;
     const h = e.http;
     if (!h) return;
-    // Only inspect requests that got no answer, or got a 401 (a cookie may have dropped).
-    if (h.status !== undefined && h.status !== 401) return;
+    if (h.status !== undefined) return;
     try {
       const u = new URL(h.url, "https://shrike.local");
       if (isAnalyticsHost(u.hostname)) return;
@@ -59,7 +58,6 @@ function blockedRequest(view: View): Flag | undefined {
 
   const h = found.http!;
   const isAbsolute = /^https?:\/\//.test(h.url);
-  
   let host = h.url;
   if (isAbsolute) {
     try {
@@ -68,20 +66,6 @@ function blockedRequest(view: View): Flag | undefined {
       // keep the raw url
     }
   }
-
-    // SameSite: cross-origin + credentials + 401. Say "may": it's a guess.
-  const hasCredentials = Boolean(h.reqHeaders?.["cookie"] || h.reqHeaders?.["authorization"]);
-  if (isAbsolute && hasCredentials && h.status === 401) {
-    return {
-      kind: "blocked_request",
-      eventId: found.id,
-      message: `The browser may have dropped your login cookie on this cross-site request (SameSite).`,
-      source: found.source,
-    };
-  }
-
-  // Everything below is the "no status" case.
-  if (h.status !== undefined) return undefined;
 
   // Mixed content: only when we know the page is https (a live-recorded page).
   // A page served from http calling an http URL is not mixed content.
@@ -94,8 +78,7 @@ function blockedRequest(view: View): Flag | undefined {
     };
   }
 
-  // CORS: an absolute (cross-origin) URL that never got a status.
-    // Cross-origin with no status. CORS is likely, but the server could also be down.
+  // Cross-origin with no status. CORS is likely, but the server could also be down.
   if (isAbsolute) {
     return {
       kind: "blocked_request",
@@ -108,6 +91,7 @@ function blockedRequest(view: View): Flag | undefined {
   // A relative URL that failed with no status is a same-origin server problem, not CORS.
   return undefined;
 }
+
 export function findFlags(view: View): Flag[] {
   const flags: Flag[] = [];
   const parentOf = new Map<TimelineNode, TimelineNode | undefined>();
@@ -213,7 +197,7 @@ export function findFlags(view: View): Flag[] {
     });
   }
 
-    const blocked = blockedRequest(view);
+  const blocked = blockedRequest(view);
   if (blocked) flags.push(blocked);
 
   // cache_never_hit: every lookup in the trip missed.

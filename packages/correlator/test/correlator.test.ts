@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { DebugEvent } from "@shrike/schema";
 import { buildActionView, compareActions, compareLocalLive, findFlags, formatActionTree, relativize } from "../src/index.ts";
 import { normalizeSql } from "../src/flags.ts";
-import { addTodo, addTodoFixed, corsBlocked, ev, mixedContent, payNow, sameOriginDown, sameSiteBlocked} from "./fixtures.ts";
+import { addTodo, addTodoFixed, corsBlocked, ev, mixedContent, payNow, sameOriginDown } from "./fixtures.ts";
 
 test("buildActionView: Add Todo tree, status, duration, framework", () => {
   const { root, events, ids } = addTodo();
@@ -347,10 +347,10 @@ test("flags: a same-origin failure with no status does not say CORS", () => {
   const blocked = flags.find((f) => f.kind === "blocked_request");
   assert.equal(blocked, undefined, "a same-origin failure must not read as CORS");
 });
-test("flags: blocked_request explains a SameSite cookie drop on a cross-origin 401", () => {
-  const { root, events } = sameSiteBlocked();
-  const flags = findFlags(buildActionView(root, events, true));
-  const blocked = flags.find((f) => f.kind === "blocked_request");
-  assert.ok(blocked, "expected a blocked_request flag");
-  assert.match(blocked.message, /SameSite/);
+
+test("summary: the What happened headline shows the blocked request caption", () => {
+  const { root, events } = corsBlocked();
+  const v = buildActionView(root, events, true);
+  assert.equal(v.summary.headline, `You clicked "Load profile". ${v.flags.find((f) => f.kind === "blocked_request")!.message}`);
+  assert.doesNotMatch(v.summary.headline, /got no response/);
 });
