@@ -42,6 +42,16 @@ const eventSchema = z
       .strip()
       .optional()
       .catch(undefined),
+    http: z
+      .object({
+        method: z.string(),
+        url: z.string(),
+        status: z.number().optional(),
+        credentials: z.literal("include").optional(),
+      })
+      .passthrough()
+      .optional()
+      .catch(undefined),
   })
   .passthrough();
 
