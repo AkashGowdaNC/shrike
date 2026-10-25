@@ -48,6 +48,7 @@ export interface DebugEvent {
     reqBody?: string; // ≤ 64KB, truncated with "…[truncated]"
     resBody?: string;
     fromCache?: true; // #55: the browser's cache or the site's service worker answered, not the network
+    credentials?: "include"; // #88: fetch credentials: "include" or XHR withCredentials; only set when sent
   };
   db?: { system: string; statement: string; params?: string };
   log?: { level: "debug" | "info" | "warn" | "error"; message: string };
